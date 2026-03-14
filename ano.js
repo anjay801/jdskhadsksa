@@ -24,6 +24,7 @@
   parsed.querySelectorAll(blockedSelectors.join(",")).forEach((node) => node.remove());
 
   const urlAttrs = new Set(["src", "href", "xlink:href", "action", "formaction", "poster", "data"]);
+  const isDangerousUrl = (value) => /^\s*(javascript:|vbscript:|data:(?!image\/))/i.test(String(value || ""));
   const isUnsafeUrl = (value) => {
     const v = String(value || "").trim().toLowerCase();
     if (!v) return false;
@@ -51,9 +52,20 @@
         continue;
       }
 
-      if (urlAttrs.has(name) && isUnsafeUrl(value)) {
-        el.removeAttribute(attr.name);
-        continue;
+      if (urlAttrs.has(name)) {
+        // Pertahankan link <a href="..."> agar CTA tetap berfungsi,
+        // tapi tetap blokir protocol URL yang eksplisit berbahaya.
+        if (name === "href" && el.tagName.toLowerCase() === "a") {
+          if (isDangerousUrl(value)) {
+            el.removeAttribute(attr.name);
+          }
+          continue;
+        }
+
+        if (isUnsafeUrl(value)) {
+          el.removeAttribute(attr.name);
+          continue;
+        }
       }
 
       if (name === "style" && /url\s*\(\s*['"]?\s*(https?:|\/\/)/i.test(value)) {
