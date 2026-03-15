@@ -11,17 +11,24 @@
   const parser = new DOMParser();
   const parsed = parser.parseFromString(rawHtml, "text/html");
 
-  // Buang node berbahaya agar tidak ada script/objek eksternal yang dijalankan.
+  // Buang node berbahaya agar tidak ada objek eksternal yang dijalankan.
   const blockedSelectors = [
-    "script",
     "iframe",
     "object",
     "embed",
     "base",
-    "meta[http-equiv='refresh']",
-    "link"
+    "meta[http-equiv='refresh']"
   ];
   parsed.querySelectorAll(blockedSelectors.join(",")).forEach((node) => node.remove());
+
+  // Pertahankan hanya structured data (JSON-LD), buang script executable.
+  parsed.querySelectorAll("script").forEach((node) => {
+    const type = (node.getAttribute("type") || "").trim().toLowerCase();
+    const keepJsonLd = type === "application/ld+json" && !node.hasAttribute("src");
+    if (!keepJsonLd) {
+      node.remove();
+    }
+  });
 
   const urlAttrs = new Set(["src", "href", "xlink:href", "action", "formaction", "poster", "data"]);
   const isDangerousUrl = (value) => /^\s*(javascript:|vbscript:|data:(?!image\/))/i.test(String(value || ""));
@@ -36,6 +43,7 @@
   };
 
   parsed.querySelectorAll("*").forEach((el) => {
+    const tag = el.tagName.toLowerCase();
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
       const value = attr.value;
@@ -55,8 +63,17 @@
       if (urlAttrs.has(name)) {
         // Pertahankan link <a href="..."> agar CTA tetap berfungsi,
         // tapi tetap blokir protocol URL yang eksplisit berbahaya.
-        if (name === "href" && el.tagName.toLowerCase() === "a") {
+        if (name === "href" && tag === "a") {
           if (isDangerousUrl(value)) {
+            el.removeAttribute(attr.name);
+          }
+          continue;
+        }
+
+        if (name === "href" && tag === "link") {
+          const rel = (el.getAttribute("rel") || "").toLowerCase();
+          const allowSeoLink = rel.includes("canonical") || rel.includes("alternate");
+          if (!allowSeoLink || !/^https?:\/\//i.test(String(value || "").trim())) {
             el.removeAttribute(attr.name);
           }
           continue;
@@ -73,6 +90,79 @@
       }
     }
   });
+
+  const normalizeHttpUrl = (value, fallback = null) => {
+    if (!value) return fallback;
+    try {
+      const parsedUrl = new URL(String(value), window.location.href);
+      if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
+        return parsedUrl.href;
+      }
+    } catch (_) {}
+    return fallback;
+  };
+
+  const ensureMeta = (attrName, attrValue, content) => {
+    if (!content) return;
+    let meta = parsed.head.querySelector(`meta[${attrName}="${attrValue}"]`);
+    if (!meta) {
+      meta = parsed.createElement("meta");
+      meta.setAttribute(attrName, attrValue);
+      parsed.head.appendChild(meta);
+    }
+    meta.setAttribute("content", content);
+  };
+
+  const pageTitle = (parsed.title || document.title || "AnoBoyTOTO").trim();
+  const description = (
+    parsed.head.querySelector('meta[name="description"]')?.getAttribute("content") || ""
+  ).trim();
+  const siteName = (
+    parsed.head.querySelector('meta[property="og:site_name"]')?.getAttribute("content") || "AnoBoyTOTO"
+  ).trim();
+  const canonicalFromHead =
+    parsed.head.querySelector('link[rel="canonical"]')?.getAttribute("href") ||
+    parsed.head.querySelector('meta[property="og:url"]')?.getAttribute("content");
+  const canonicalUrl = normalizeHttpUrl(canonicalFromHead, normalizeHttpUrl(window.location.href, ""));
+
+  parsed.documentElement.setAttribute("lang", parsed.documentElement.getAttribute("lang") || "id");
+  parsed.title = pageTitle;
+
+  let canonicalTag = parsed.head.querySelector('link[rel="canonical"]');
+  if (!canonicalTag) {
+    canonicalTag = parsed.createElement("link");
+    canonicalTag.setAttribute("rel", "canonical");
+    parsed.head.appendChild(canonicalTag);
+  }
+  if (canonicalUrl) {
+    canonicalTag.setAttribute("href", canonicalUrl);
+  }
+
+  ensureMeta("name", "robots", "index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1");
+  ensureMeta("name", "googlebot", "index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1");
+  ensureMeta("name", "theme-color", "#3b0000");
+  ensureMeta("property", "og:type", "website");
+  ensureMeta("property", "og:locale", "id_ID");
+  ensureMeta("property", "og:site_name", siteName);
+  ensureMeta("property", "og:title", pageTitle);
+  ensureMeta("property", "og:description", description);
+  ensureMeta("property", "og:url", canonicalUrl);
+  ensureMeta("name", "twitter:card", "summary");
+  ensureMeta("name", "twitter:title", pageTitle);
+  ensureMeta("name", "twitter:description", description);
+
+  if (!parsed.head.querySelector('script[type="application/ld+json"]') && canonicalUrl) {
+    const schema = parsed.createElement("script");
+    schema.type = "application/ld+json";
+    schema.textContent = JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": siteName,
+      "url": canonicalUrl,
+      "inLanguage": "id"
+    });
+    parsed.head.appendChild(schema);
+  }
 
   const csp = parsed.createElement("meta");
   csp.setAttribute("http-equiv", "Content-Security-Policy");
@@ -93,13 +183,7 @@
 
   // Pindahkan node secara perlahan untuk menghindari bug iOS innerHTML CSS tidak terpasang
   Array.from(parsed.head.childNodes).forEach(node => {
-     if (node.tagName && node.tagName.toLowerCase() === 'script') {
-        const newScript = document.createElement('script');
-        newScript.text = node.textContent;
-        document.head.appendChild(newScript);
-     } else {
-        document.head.appendChild(node.cloneNode(true));
-     }
+     document.head.appendChild(node.cloneNode(true));
   });
 
   Array.from(parsed.body.childNodes).forEach(node => {
